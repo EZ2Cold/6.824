@@ -373,7 +373,7 @@ func (rf *Raft) ticker() {
 		// Your code here (3A)
 		// Check if a leader election should be started.
 
-		// 如果选举计时器超时，且当前服务器为处于Follower/Candidate状态，开始选举
+		// 如果选举计时器超时，且当前服务器处于Follower/Candidate状态，开始选举
 		rf.mu.Lock()
 		if (time.Since(rf.electionStartTime) >= ElectionTimeout) && (rf.status == Follower || rf.status == Candidate) {
 			// 重置选举计时器
@@ -394,9 +394,10 @@ func (rf *Raft) ticker() {
 				}
 				go func(i int, term int) {
 					// 该goroutine周期性地向一个特定的服务器发起RequestVote
-					// 每个RPC都在一个go routine中发起，避免阻塞，一个例子是，给一个服务器掉线了的服务器发送RPC，如果不向该服务器继续发出新的RPC，则永远不能得到它的票
+					// 参数i是负责的服务器的id
+					// 参数term保存该goroutine属于的term
 
-					// 在以下条件下不再发送
+					// 在以下条件下不再发送：
 					// 如果发出时的term与当前term不一致，可能开始了新一轮的选举，也可能成为了更高term的follower，直接返回
 					// 某次调用成功后得到了投票结果，不再发送
 					// 如果当前状态为follower（其他具有相同term的服务器成为leader）或leader（已经选举成功），直接返回
@@ -423,6 +424,7 @@ func (rf *Raft) ticker() {
 							if ok {
 								rf.mu.Lock()
 								if reply.Term > rf.currentTerm {
+									// 发现更高的term，直接转为Follower
 									rf.status = Follower
 									rf.currentTerm = reply.Term
 									rf.votedFor = -1
@@ -469,21 +471,20 @@ func (rf *Raft) ticker() {
 }
 
 func (rf *Raft) sendAppendEntries() {
-	// 启动多个goroutine并行地向follower发送AppendEntries RPC
 	for i := 0; i < len(rf.peers); i++ {
 		if i == rf.me {
 			continue
 		}
 		go func(i int, term int) {
+			// 该goroutine周期性地向一个特定的服务器发起AppendEntries
 			// 参数term保存该goroutine属于的term
+
+			// 在以下情况下不再发送心跳信息：
+			// leader的term发生了改变
 			for !rf.killed() {
-				// 可以同时向同一个follower发送多个AppendEntries RPC
-				// TODO raft中的RPC是幂等的，需要注意这个问题
 				rf.mu.Lock()
 				if rf.currentTerm != term {
-					// 如果服务器的term改变了，不再发起AppendEntries RPC
 					rf.mu.Unlock()
-					DPrintf("S%d's AppendEntries goroutine exit\n", rf.me)
 					return
 				}
 				args := &AppendEntriesArgs{Term: rf.currentTerm, LeaderId: rf.me}
@@ -497,7 +498,7 @@ func (rf *Raft) sendAppendEntries() {
 					// 调用成功，判断是否需要更新当前服务器的状态
 					rf.mu.Lock()
 					if reply.Term > rf.currentTerm {
-						// 发现更大的term，转为follower
+						// 发现更大的term，转为Follower
 						rf.currentTerm = reply.Term
 						rf.status = Follower
 						rf.votedFor = -1
