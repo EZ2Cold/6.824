@@ -550,7 +550,8 @@ func (rf *Raft) ticker() {
 }
 
 func (rf *Raft) updateCommitIndex() {
-	go func(term int) {
+	go func(term int, start_idx int) {
+		// start_idx：前面的term的最后一个日志条目的index
 		// 周期性地更新commitIndex
 		for !rf.killed() {
 			rf.mu.Lock()
@@ -558,7 +559,7 @@ func (rf *Raft) updateCommitIndex() {
 				rf.mu.Unlock()
 				return
 			}
-			for i := rf.commitIndex + 1; ; i++ {
+			for i := start_idx + 1; i < len(rf.log); i++ {
 				cnt := 1
 				for j := 0; j < len(rf.peers); j++ {
 					if j == rf.me {
@@ -570,7 +571,8 @@ func (rf *Raft) updateCommitIndex() {
 				}
 				if cnt >= 1+len(rf.peers)/2 {
 					rf.commitIndex = i
-					DPrintf("Leader S%d commit the log entry at index %d, cmd: %v\n", rf.me, rf.commitIndex, rf.log[rf.commitIndex].Command)
+					start_idx = i
+					DPrintf("Leader S%d commit log entries util index %d\n", rf.me, rf.commitIndex)
 				} else {
 					break
 				}
@@ -578,7 +580,7 @@ func (rf *Raft) updateCommitIndex() {
 			rf.mu.Unlock()
 			time.Sleep(UpdateCommittedTimeout)
 		}
-	}(rf.currentTerm)
+	}(rf.currentTerm, len(rf.log)-1)
 }
 
 func (rf *Raft) sendAppendEntries() {
