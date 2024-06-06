@@ -117,7 +117,6 @@ func (c *Coordinator) Done() bool {
 // main/mrcoordinator.go calls this function.
 // nReduce is the number of reduce tasks to use.
 func MakeCoordinator(files []string, nReduce int) *Coordinator {
-	// TODO 启动一个后台线程重分配执行时间久的任务
 	c := Coordinator{}
 
 	// Your code here.

@@ -7,7 +7,7 @@
 一个服务器通过选举成功成为Leader后，对于每个服务器都会创建一个对应的goroutine，该routine负责通过`AppendEntries RPC`周期性地向`Follower`发送心跳信息。
 
 ### RPC请求处理和响应处理
-对`RequestVote`和`AppendEntries` RPC的处理可以参考论文的Figure2。
+对`RequestVote`和`AppendEntries` RPC请求的处理可以参考论文的Figure2。
 
 对RPC响应处理的步骤如下：
 1. 判断是否发现更大的term，若是，更新当前term，转为Follower（如果当前为Candidate或者Leader），直接返回
