@@ -67,22 +67,22 @@ type logEntry struct {
 }
 
 // 基础选举超时时间
-const ElectionTimeout = 800 * time.Millisecond
+const ElectionTimeout = 600 * time.Millisecond
 
 // 心跳周期
-const HeartbeatTimeout = 160 * time.Millisecond
+const HeartbeatTimeout = 150 * time.Millisecond
 
 // RequestVote重发时间
-const RequestVoteTimeout = 50 * time.Millisecond
+const RequestVoteTimeout = 200 * time.Millisecond
 
 // AppendEntries发送周期
-const AppendEntriesTimeout = 50 * time.Millisecond
+const AppendEntriesTimeout = 20 * time.Millisecond
 
 // 向状态机发送已提交日志的周期
-const SubmitTimeout = 50 * time.Millisecond
+const SubmitTimeout = 100 * time.Millisecond
 
 // Leader更新commitIndex的周期
-const UpdateCommittedTimeout = 50 * time.Millisecond
+const UpdateCommittedTimeout = 100 * time.Millisecond
 
 // A Go object implementing a single Raft peer.
 type Raft struct {
@@ -230,6 +230,7 @@ func (rf *Raft) RequestVote(args *RequestVoteArgs, reply *RequestVoteReply) {
 			if rf.checkUpToDate(args) {
 				rf.votedFor = args.Candidateid
 				reply.VoteGranted = true
+				rf.electionStartTime = time.Now()
 			} else {
 				reply.VoteGranted = false
 			}
@@ -241,14 +242,16 @@ func (rf *Raft) RequestVote(args *RequestVoteArgs, reply *RequestVoteReply) {
 		// 更新该结点的term
 		rf.currentTerm = args.Term
 		// 如果当前节点为Leader或者Candidate，转为Follower
-		rf.status = Follower
-		// 重置选举计时器
-		rf.electionStartTime = time.Now()
+		if rf.status == Leader || rf.status == Candidate {
+			rf.status = Follower
+			rf.electionStartTime = time.Now()
+		}
 		rf.votedFor = -1
 		// 检查是否up-to-date
 		if rf.checkUpToDate(args) {
 			rf.votedFor = args.Candidateid
 			reply.VoteGranted = true
+			rf.electionStartTime = time.Now()
 		} else {
 			reply.VoteGranted = false
 		}
@@ -326,7 +329,7 @@ func (rf *Raft) AppendEntries(args *AppendEntriesArgs, reply *AppendEntriesReply
 	rf.mu.Lock()
 	defer rf.mu.Unlock()
 
-	DPrintf("S%d receive an AppendEntries RPC from S%d", rf.me, args.LeaderId)
+	// DPrintf("S%d receive an AppendEntries RPC from S%d", rf.me, args.LeaderId)
 	if args.Term < rf.currentTerm {
 		reply.Term = rf.currentTerm
 		reply.Success = false
@@ -335,11 +338,11 @@ func (rf *Raft) AppendEntries(args *AppendEntriesArgs, reply *AppendEntriesReply
 		// 当前服务器可能为老的leader，或者选举失败的candidate，或者已经是follower了
 		if args.Term > rf.currentTerm {
 			rf.votedFor = -1
+			DPrintf("S%d turn to a follower of leader S%d\n", rf.me, args.LeaderId)
 		}
 		rf.currentTerm = args.Term
 		rf.status = Follower
 		rf.electionStartTime = time.Now()
-		DPrintf("S%d turn to a follower of leader S%d\n", rf.me, args.LeaderId)
 		// 判断preLogIndex和preLogTerm是否一致
 		if len(rf.log) >= args.PrevLogIndex+1 && rf.log[args.PrevLogIndex].Term == args.PrevLogTerm {
 			reply.Success = true
@@ -347,13 +350,7 @@ func (rf *Raft) AppendEntries(args *AppendEntriesArgs, reply *AppendEntriesReply
 			idx_of_last_new_entry := rf.updateLog(args)
 			// 更新commitIndex
 			if args.LeaderCommit > rf.commitIndex {
-				rf.commitIndex = func(a, b int) int {
-					if a < b {
-						return a
-					} else {
-						return b
-					}
-				}(args.LeaderCommit, idx_of_last_new_entry)
+				rf.commitIndex = min(args.LeaderCommit, idx_of_last_new_entry)
 				DPrintf("S%d update its commitIndex to %d\n", rf.me, rf.commitIndex)
 			}
 		} else {
@@ -365,17 +362,19 @@ func (rf *Raft) AppendEntries(args *AppendEntriesArgs, reply *AppendEntriesReply
 
 func (rf *Raft) updateLog(args *AppendEntriesArgs) int {
 	if len(args.Entries) == 0 {
+		DPrintf("S%d receive a heartbeat from S%d\n", rf.me, args.LeaderId)
 		return args.PrevLogIndex
 	}
 	if len(rf.log) >= args.PrevLogIndex+2 {
 		if rf.log[args.PrevLogIndex+1].Term != args.Entries[0].Term {
 			rf.log = rf.log[:args.PrevLogIndex+2]
 			rf.log[args.PrevLogIndex+1] = args.Entries[0]
+			DPrintf("S%d modify a log entry at index %d to cmd: %v\n", rf.me, args.PrevLogIndex+1, rf.log[args.PrevLogIndex+1])
 		}
 	} else {
 		rf.log = append(rf.log, args.Entries[0])
+		DPrintf("S%d append a log entry at index %d, cmd: %v\n", rf.me, args.PrevLogIndex+1, rf.log[args.PrevLogIndex+1])
 	}
-	DPrintf("S%d append a log entry at index %d, cmd: %v\n", rf.me, args.PrevLogIndex+1, rf.log[args.PrevLogIndex+1])
 	return args.PrevLogIndex + 1
 }
 
@@ -398,7 +397,7 @@ func (rf *Raft) Start(command interface{}) (int, int, bool) {
 	defer rf.mu.Unlock()
 	if !rf.killed() && rf.status == Leader {
 		rf.log = append(rf.log, logEntry{Term: rf.currentTerm, Command: command})
-		DPrintf("Leader S%d append an entry in the log at index %d\n", rf.me, len(rf.log)-1)
+		DPrintf("Leader S%d append an entry in the log at index %d cmd: %v \n", rf.me, len(rf.log)-1, command)
 		return len(rf.log) - 1, rf.currentTerm, true
 	} else {
 		return len(rf.log) - 1, rf.currentTerm, false
@@ -448,6 +447,7 @@ func (rf *Raft) ticker() {
 		// 如果选举计时器超时，且当前服务器处于Follower/Candidate状态，开始选举
 		rf.mu.Lock()
 		if (time.Since(rf.electionStartTime) >= ElectionTimeout) && (rf.status == Follower || rf.status == Candidate) {
+			DPrintf("S%d election timeout\n", rf.me)
 			// 重置选举计时器
 			rf.electionStartTime = time.Now()
 			// 状态变更为Candidate
@@ -646,12 +646,14 @@ func (rf *Raft) handleAppendEntriesReply(i int, args *AppendEntriesArgs, reply *
 		nextIndex := args.PrevLogIndex + 1 + len(args.Entries)
 		if nextIndex > rf.matchIndex[i] {
 			rf.matchIndex[i] = nextIndex - 1
+			DPrintf("Leader S%d change S%d's matchIndex to %d\n", rf.me, i, rf.matchIndex[i])
 		}
 		rf.nextIndex[i] = max(rf.nextIndex[i], nextIndex)
 	} else {
 		nextIndex := args.PrevLogIndex
 		if rf.nextIndex[i] <= nextIndex+1 {
 			rf.nextIndex[i] = min(rf.nextIndex[i], nextIndex)
+			DPrintf("Leader S%d change S%d's nextIndex to %d\n", rf.me, i, rf.nextIndex[i])
 		}
 	}
 
@@ -687,6 +689,7 @@ func (rf *Raft) sendHeartBeat() {
 				rf.mu.Lock()
 				if rf.currentTerm != term {
 					rf.mu.Unlock()
+					DPrintf("Leader S%d stop sending heartbeat to S%d\n", rf.me, i)
 					return
 				}
 				args := &AppendEntriesArgs{
@@ -699,6 +702,8 @@ func (rf *Raft) sendHeartBeat() {
 				if rf.nextIndex[i] != len(rf.log) {
 					// 心跳信息携带待同步的日志条目
 					args.Entries = []logEntry{rf.log[rf.nextIndex[i]]}
+				} else {
+					DPrintf("Leader S%d send a heartbeat to S%d\n", rf.me, i)
 				}
 				go func() {
 					reply := &AppendEntriesReply{}

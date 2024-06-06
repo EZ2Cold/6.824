@@ -534,6 +534,7 @@ func TestBackup3B(t *testing.T) {
 		other = (leader2 + 1) % servers
 	}
 	cfg.disconnect(other)
+	DPrintf("S%d disconnect\n", other)
 
 	// lots more commands that won't commit
 	for i := 0; i < 50; i++ {
