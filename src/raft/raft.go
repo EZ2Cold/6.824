@@ -347,6 +347,14 @@ type AppendEntriesArgs struct {
 type AppendEntriesReply struct {
 	Term    int
 	Success bool
+
+	// 如果AppendEntries返回false，以下变量用于帮助Leader快速地回退nextIndex
+	// 冲突日志的term
+	XTerm int
+	// 该term的第一个日志的index
+	XIndex int
+	// 日志长度
+	XLen int
 }
 
 func (rf *Raft) AppendEntries(args *AppendEntriesArgs, reply *AppendEntriesReply) {
@@ -378,8 +386,17 @@ func (rf *Raft) AppendEntries(args *AppendEntriesArgs, reply *AppendEntriesReply
 				rf.commitIndex = min(args.LeaderCommit, idx_of_last_new_entry)
 				DPrintf("S%d update its commitIndex to %d\n", rf.me, rf.commitIndex)
 			}
+			reply.XLen = len(rf.log)
 		} else {
 			reply.Success = false
+			reply.XLen = len(rf.log)
+			if len(rf.log) >= args.PrevLogIndex+1 {
+				reply.XTerm = rf.log[args.PrevLogIndex].Term
+				i := args.PrevLogIndex
+				for ; rf.log[i].Term == reply.XTerm; i-- {
+				}
+				reply.XIndex = i + 1
+			}
 		}
 	}
 	reply.Term = rf.currentTerm
@@ -545,20 +562,20 @@ func (rf *Raft) ticker() {
 									rf.electionRes[i] = reply.VoteGranted
 									if reply.VoteGranted {
 										rf.voteGot++
+										// 恰好拿到（N+1）/2个票数时启动后台routine发出心跳信息
+										if rf.voteGot == 1+len(rf.peers)/2 {
+											rf.status = Leader
+											// 重新初始化nextIndex和matchIndex
+											for i := 0; i < len(rf.peers); i++ {
+												rf.nextIndex[i] = len(rf.log)
+												rf.matchIndex[i] = 0
+											}
+											DPrintf("S%d win the election! voteGot = %d\n", rf.me, rf.voteGot)
+											rf.sendHeartBeat()
+											rf.sendAppendEntries()
+											rf.updateCommitIndex()
+										}
 									}
-								}
-								// 恰好拿到（N+1）/2个票数时启动后台routine发出心跳信息
-								if rf.voteGot == 1+len(rf.peers)/2 {
-									rf.status = Leader
-									// 重新初始化nextIndex和matchIndex
-									for i := 0; i < len(rf.peers); i++ {
-										rf.nextIndex[i] = len(rf.log)
-										rf.matchIndex[i] = 0
-									}
-									DPrintf("S%d win the election!\n", rf.me)
-									rf.sendHeartBeat()
-									rf.sendAppendEntries()
-									rf.updateCommitIndex()
 								}
 								rf.mu.Unlock()
 							}
@@ -642,6 +659,7 @@ func (rf *Raft) sendAppendEntries() {
 					}
 					go func() {
 						reply := &AppendEntriesReply{}
+						DPrintf("Leader S%d send AppendEntries to S%d, nextIndex = %d\n", rf.me, i, rf.nextIndex[i])
 						ok := rf.peers[i].Call("Raft.AppendEntries", args, reply)
 						if !ok {
 							return
@@ -673,20 +691,46 @@ func (rf *Raft) handleAppendEntriesReply(i int, args *AppendEntriesArgs, reply *
 		// 发出请求到得到响应期间，term发生了改变，直接返回
 		return
 	}
-	// 心跳信息，只需更新nextIndex
-	// TODO 调整nextIndex，matchIndex
+	// 调整nextIndex，matchIndex
 	if reply.Success {
 		nextIndex := args.PrevLogIndex + 1 + len(args.Entries)
 		if nextIndex > rf.matchIndex[i] {
 			rf.matchIndex[i] = nextIndex - 1
 			DPrintf("Leader S%d change S%d's matchIndex to %d\n", rf.me, i, rf.matchIndex[i])
 		}
+		old := rf.nextIndex[i]
 		rf.nextIndex[i] = max(rf.nextIndex[i], nextIndex)
+		DPrintf("AppendEntries return true; Leader S%d(%d) change S%d(%d)'s nextIndex from %d to %d\n", rf.me, len(rf.log), i, reply.XLen, old, rf.nextIndex[i])
 	} else {
-		nextIndex := args.PrevLogIndex
-		if rf.nextIndex[i] <= nextIndex+1 {
-			rf.nextIndex[i] = min(rf.nextIndex[i], nextIndex)
-			DPrintf("Leader S%d change S%d's nextIndex to %d\n", rf.me, i, rf.nextIndex[i])
+		DPrintf("S%d XTerm = %d XIndex = %d XLen = %d \n", i, reply.XTerm, reply.XIndex, reply.XLen)
+		nextIndex := 0
+		if reply.XLen < args.PrevLogIndex+1 {
+			// follower的日志比较短
+			nextIndex = reply.XLen
+			DPrintf("Leader log length = %d, S%d has shorter log, nextIndex = %d\n", len(rf.log), i, nextIndex)
+		} else {
+			j := args.PrevLogIndex
+			for ; rf.log[j].Term > reply.XTerm; j-- {
+			}
+			if rf.log[j].Term != reply.XTerm {
+				// leader日志中不存在XTerm
+				nextIndex = reply.XIndex
+				DPrintf("Leader does not contain conflicting term %d, nextIndex = %d\n", reply.XTerm, reply.XIndex)
+			} else {
+				// leaderr日志中存在XTerm，指向最后一个条目的后一个entry
+				nextIndex = j + 1
+				DPrintf("Leader contain conflicting term %d, nextIndex = %d\n", reply.XTerm, nextIndex)
+			}
+		}
+		if rf.nextIndex[i] <= args.PrevLogIndex+1 {
+			// 若当前nextIndex比请求时的nextIndex大，说明请求时的nextIndex之前的条目都已经匹配了，没必要回退
+			if nextIndex > rf.matchIndex[i] {
+				// 如果回退的nextIndex小于等于matchIndex，则不回退
+				old := rf.nextIndex[i]
+				// 只有回退的nextIndex比当前nextIndex小，才回退
+				rf.nextIndex[i] = min(rf.nextIndex[i], nextIndex)
+				DPrintf("AppendEntries return false; Leader S%d(%d) change S%d(%d)'s nextIndex from %d to %d\n", rf.me, len(rf.log), i, reply.XLen, old, rf.nextIndex[i])
+			}
 		}
 	}
 

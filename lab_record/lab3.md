@@ -40,3 +40,5 @@ RequestVote和AppendEntries都是幂等的（即如果参数相同，则任意�
 * 由Follower转为Cnadidate时保存term和voteFor
 * 处理RequestVote响应时
 * 处理AppendEntries响应时
+
+3. 优化nextIndex的回退以通过TestFigure8Unreliable3C测试
