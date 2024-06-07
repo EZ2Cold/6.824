@@ -42,3 +42,4 @@ RequestVote和AppendEntries都是幂等的（即如果参数相同，则任意�
 * 处理AppendEntries响应时
 
 3. 优化nextIndex的回退以通过TestFigure8Unreliable3C测试
+Leader第一次与Follower同步完成之后，就将剩余日志全部发送给Follower

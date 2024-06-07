@@ -120,6 +120,8 @@ type Raft struct {
 	nextIndex []int
 	// 对于每个服务器，保存已经匹配的日志条目的最大index
 	matchIndex []int
+	// Leader是否完成过一次成功的AppendEntries调用
+	isSync []bool
 }
 
 func (rf *Raft) printState() {
@@ -254,6 +256,7 @@ func (rf *Raft) RequestVote(args *RequestVoteArgs, reply *RequestVoteReply) {
 				rf.votedFor = args.Candidateid
 				rf.persist()
 				reply.VoteGranted = true
+				DPrintf("S%d vote for S%d\n", rf.me, args.Candidateid)
 				rf.electionStartTime = time.Now()
 			} else {
 				reply.VoteGranted = false
@@ -276,14 +279,13 @@ func (rf *Raft) RequestVote(args *RequestVoteArgs, reply *RequestVoteReply) {
 			rf.votedFor = args.Candidateid
 			reply.VoteGranted = true
 			rf.electionStartTime = time.Now()
+			DPrintf("S%d vote for S%d\n", rf.me, args.Candidateid)
 		} else {
 			reply.VoteGranted = false
 		}
 		rf.persist()
 	}
-	if reply.VoteGranted {
-		DPrintf("S%d vote for S%d\n", rf.me, args.Candidateid)
-	} else {
+	if !reply.VoteGranted {
 		DPrintf("S%d do not vote for S%d\n", rf.me, args.Candidateid)
 	}
 	reply.Term = rf.currentTerm
@@ -407,19 +409,37 @@ func (rf *Raft) updateLog(args *AppendEntriesArgs) int {
 		DPrintf("S%d receive a heartbeat from S%d\n", rf.me, args.LeaderId)
 		return args.PrevLogIndex
 	}
-	if len(rf.log) >= args.PrevLogIndex+2 {
-		if rf.log[args.PrevLogIndex+1].Term != args.Entries[0].Term {
-			rf.log = rf.log[:args.PrevLogIndex+2]
-			rf.log[args.PrevLogIndex+1] = args.Entries[0]
-			rf.persist()
-			DPrintf("S%d modify a log entry at index %d to cmd: %v\n", rf.me, args.PrevLogIndex+1, rf.log[args.PrevLogIndex+1])
+	// if len(rf.log) >= args.PrevLogIndex+2 {
+	// 	if rf.log[args.PrevLogIndex+1].Term != args.Entries[0].Term {
+	// 		rf.log = rf.log[:args.PrevLogIndex+2]
+	// 		rf.log[args.PrevLogIndex+1] = args.Entries[0]
+	// 		rf.persist()
+	// 		DPrintf("S%d modify a log entry at index %d to cmd: %v\n", rf.me, args.PrevLogIndex+1, rf.log[args.PrevLogIndex+1])
+	// 	}
+	// } else {
+	// 	rf.log = append(rf.log, args.Entries[0])
+	// 	rf.persist()
+	// 	DPrintf("S%d append a log entry at index %d, cmd: %v\n", rf.me, args.PrevLogIndex+1, rf.log[args.PrevLogIndex+1])
+	// }
+
+	if len(rf.log) >= args.PrevLogIndex+1+len(args.Entries) {
+		conflict := false
+		for j := 0; j < len(args.Entries); j++ {
+			if args.Entries[j].Term != rf.log[args.PrevLogIndex+1+j].Term {
+				conflict = true
+				rf.log[args.PrevLogIndex+1+j] = args.Entries[j]
+			}
+		}
+		if conflict {
+			rf.log = rf.log[:args.PrevLogIndex+1+len(args.Entries)]
 		}
 	} else {
-		rf.log = append(rf.log, args.Entries[0])
-		rf.persist()
-		DPrintf("S%d append a log entry at index %d, cmd: %v\n", rf.me, args.PrevLogIndex+1, rf.log[args.PrevLogIndex+1])
+		rf.log = rf.log[:args.PrevLogIndex+1]
+		rf.log = append(rf.log, args.Entries...)
 	}
-	return args.PrevLogIndex + 1
+	rf.persist()
+	DPrintf("S%d sync log entries util index %d\n", rf.me, args.PrevLogIndex+len(args.Entries))
+	return args.PrevLogIndex + len(args.Entries)
 }
 
 // the service using Raft (e.g. a k/v server) wants to start
@@ -565,10 +585,11 @@ func (rf *Raft) ticker() {
 										// 恰好拿到（N+1）/2个票数时启动后台routine发出心跳信息
 										if rf.voteGot == 1+len(rf.peers)/2 {
 											rf.status = Leader
-											// 重新初始化nextIndex和matchIndex
+											// 重新初始化nextIndex,matchIndex和isSync
 											for i := 0; i < len(rf.peers); i++ {
 												rf.nextIndex[i] = len(rf.log)
 												rf.matchIndex[i] = 0
+												rf.isSync[i] = false
 											}
 											DPrintf("S%d win the election! voteGot = %d\n", rf.me, rf.voteGot)
 											rf.sendHeartBeat()
@@ -654,8 +675,12 @@ func (rf *Raft) sendAppendEntries() {
 						LeaderId:     rf.me,
 						PrevLogIndex: rf.nextIndex[i] - 1,
 						PrevLogTerm:  rf.log[rf.nextIndex[i]-1].Term,
-						Entries:      []logEntry{rf.log[rf.nextIndex[i]]},
 						LeaderCommit: rf.commitIndex,
+					}
+					if rf.isSync[i] {
+						args.Entries = rf.log[rf.nextIndex[i]:]
+					} else {
+						args.Entries = []logEntry{rf.log[rf.nextIndex[i]]}
 					}
 					go func() {
 						reply := &AppendEntriesReply{}
@@ -685,6 +710,7 @@ func (rf *Raft) handleAppendEntriesReply(i int, args *AppendEntriesArgs, reply *
 		rf.votedFor = -1
 		rf.persist()
 		rf.electionStartTime = time.Now()
+		DPrintf("S%d turn to a follower of leader S%d\n", rf.me, args.LeaderId)
 		return
 	}
 	if rf.currentTerm != args.Term {
@@ -693,6 +719,9 @@ func (rf *Raft) handleAppendEntriesReply(i int, args *AppendEntriesArgs, reply *
 	}
 	// 调整nextIndex，matchIndex
 	if reply.Success {
+		if !rf.isSync[i] {
+			rf.isSync[i] = true
+		}
 		nextIndex := args.PrevLogIndex + 1 + len(args.Entries)
 		if nextIndex > rf.matchIndex[i] {
 			rf.matchIndex[i] = nextIndex - 1
@@ -828,6 +857,7 @@ func Make(peers []*labrpc.ClientEnd, me int,
 	rf.nextIndex = make([]int, len(peers))
 	rf.matchIndex = make([]int, len(peers))
 	rf.lastApplied = 0
+	rf.isSync = make([]bool, len(peers))
 	// log下标从1开始，所以初始时添加一个空条目
 	rf.log = append(rf.log, logEntry{Term: 0})
 
