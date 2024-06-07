@@ -21,3 +21,22 @@ RequestVote和AppendEntries都是幂等的（即如果参数相同，则任意�
 
 
 ## Part 3B: log
+### 每个服务器的线程
+
+### Figure 8
+
+### 问题记录
+1. TestBackup3B测试中遇到的问题，如果每收到一个RequestVote就重置自己的选举计时器，会导致拥有up-to-date的服务器久久不能成为leader，达成一致的时间较长
+只有投赞成票才重置超时计时器
+
+
+## Part 3C: persistence
+1. 为什么需要持久化
+
+2. 什么时候需要进行持久化
+* 执行RequestVote函数时
+* 执行AppendEntries函数时
+* Start函数中向Leader追加日志时
+* 由Follower转为Cnadidate时保存term和voteFor
+* 处理RequestVote响应时
+* 处理AppendEntries响应时

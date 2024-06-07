@@ -20,12 +20,15 @@ package raft
 import (
 	//	"bytes"
 
+	"bytes"
+	"log"
 	"math/rand"
 	"sync"
 	"sync/atomic"
 	"time"
 
 	//	"6.5840/labgob"
+	"6.5840/labgob"
 	"6.5840/labrpc"
 )
 
@@ -161,6 +164,14 @@ func (rf *Raft) persist() {
 	// e.Encode(rf.yyy)
 	// raftstate := w.Bytes()
 	// rf.persister.Save(raftstate, nil)
+
+	w := new(bytes.Buffer)
+	e := labgob.NewEncoder(w)
+	e.Encode(rf.currentTerm)
+	e.Encode(rf.votedFor)
+	e.Encode(rf.log)
+	raftstate := w.Bytes()
+	rf.persister.Save(raftstate, nil)
 }
 
 // restore previously persisted state.
@@ -181,6 +192,18 @@ func (rf *Raft) readPersist(data []byte) {
 	//   rf.xxx = xxx
 	//   rf.yyy = yyy
 	// }
+
+	r := bytes.NewBuffer(data)
+	d := labgob.NewDecoder(r)
+	var currentTerm, voteFor int
+	var logs []logEntry
+	if d.Decode(&currentTerm) != nil || d.Decode(&voteFor) != nil || d.Decode(&logs) != nil {
+		log.Fatal("readPersist: decode failed\n")
+	} else {
+		rf.currentTerm = currentTerm
+		rf.votedFor = voteFor
+		rf.log = logs
+	}
 }
 
 // the service says it has created a snapshot that has
@@ -229,6 +252,7 @@ func (rf *Raft) RequestVote(args *RequestVoteArgs, reply *RequestVoteReply) {
 			// 检验是否up-to-date
 			if rf.checkUpToDate(args) {
 				rf.votedFor = args.Candidateid
+				rf.persist()
 				reply.VoteGranted = true
 				rf.electionStartTime = time.Now()
 			} else {
@@ -255,7 +279,7 @@ func (rf *Raft) RequestVote(args *RequestVoteArgs, reply *RequestVoteReply) {
 		} else {
 			reply.VoteGranted = false
 		}
-
+		rf.persist()
 	}
 	if reply.VoteGranted {
 		DPrintf("S%d vote for S%d\n", rf.me, args.Candidateid)
@@ -337,10 +361,11 @@ func (rf *Raft) AppendEntries(args *AppendEntriesArgs, reply *AppendEntriesReply
 	} else {
 		// 当前服务器可能为老的leader，或者选举失败的candidate，或者已经是follower了
 		if args.Term > rf.currentTerm {
+			rf.currentTerm = args.Term
 			rf.votedFor = -1
+			rf.persist()
 			DPrintf("S%d turn to a follower of leader S%d\n", rf.me, args.LeaderId)
 		}
-		rf.currentTerm = args.Term
 		rf.status = Follower
 		rf.electionStartTime = time.Now()
 		// 判断preLogIndex和preLogTerm是否一致
@@ -369,10 +394,12 @@ func (rf *Raft) updateLog(args *AppendEntriesArgs) int {
 		if rf.log[args.PrevLogIndex+1].Term != args.Entries[0].Term {
 			rf.log = rf.log[:args.PrevLogIndex+2]
 			rf.log[args.PrevLogIndex+1] = args.Entries[0]
+			rf.persist()
 			DPrintf("S%d modify a log entry at index %d to cmd: %v\n", rf.me, args.PrevLogIndex+1, rf.log[args.PrevLogIndex+1])
 		}
 	} else {
 		rf.log = append(rf.log, args.Entries[0])
+		rf.persist()
 		DPrintf("S%d append a log entry at index %d, cmd: %v\n", rf.me, args.PrevLogIndex+1, rf.log[args.PrevLogIndex+1])
 	}
 	return args.PrevLogIndex + 1
@@ -397,6 +424,7 @@ func (rf *Raft) Start(command interface{}) (int, int, bool) {
 	defer rf.mu.Unlock()
 	if !rf.killed() && rf.status == Leader {
 		rf.log = append(rf.log, logEntry{Term: rf.currentTerm, Command: command})
+		rf.persist()
 		DPrintf("Leader S%d append an entry in the log at index %d cmd: %v \n", rf.me, len(rf.log)-1, command)
 		return len(rf.log) - 1, rf.currentTerm, true
 	} else {
@@ -456,6 +484,7 @@ func (rf *Raft) ticker() {
 			rf.currentTerm++
 			// 为自己投票
 			rf.votedFor = rf.me
+			rf.persist()
 			// 重置选举结果
 			rf.electionRes = map[int]bool{}
 			// 给自己投一票
@@ -484,7 +513,7 @@ func (rf *Raft) ticker() {
 							rf.mu.Unlock()
 							return
 						}
-						if rf.status == Follower || rf.status == Leader {
+						if rf.status != Candidate {
 							rf.mu.Unlock()
 							return
 						}
@@ -500,6 +529,7 @@ func (rf *Raft) ticker() {
 									rf.status = Follower
 									rf.currentTerm = reply.Term
 									rf.votedFor = -1
+									rf.persist()
 									// 重置选举计时器
 									rf.electionStartTime = time.Now()
 									rf.mu.Unlock()
@@ -635,6 +665,7 @@ func (rf *Raft) handleAppendEntriesReply(i int, args *AppendEntriesArgs, reply *
 		rf.currentTerm = reply.Term
 		rf.status = Follower
 		rf.votedFor = -1
+		rf.persist()
 		rf.electionStartTime = time.Now()
 		return
 	}
@@ -756,11 +787,11 @@ func Make(peers []*labrpc.ClientEnd, me int,
 	// log下标从1开始，所以初始时添加一个空条目
 	rf.log = append(rf.log, logEntry{Term: 0})
 
-	// 启动后台routine周期性应用已经提交的命令
-	go rf.submit()
-
 	// initialize from state persisted before a crash
 	rf.readPersist(persister.ReadRaftState())
+
+	// 启动后台routine周期性应用已经提交的命令
+	go rf.submit()
 
 	// start ticker goroutine to start elections
 	go rf.ticker()
