@@ -1,7 +1,7 @@
 #!/bin/bash
 
 # 定义测试次数
-num_tests=30
+num_tests=1000
 
 # 创建 logs 目录以存储输出文件
 mkdir -p logs
@@ -15,7 +15,7 @@ start_time=$(date)
 echo "测试开始时间: $start_time" > logs/time
 
 # 生成任务列表并并行执行测试
-seq 1 $num_tests | parallel -j 5 'rm -f logs/out{} && ./test -test.run 3C > logs/out{}'
+seq 1 $num_tests | parallel -j 10 'rm -f logs/out{} && ./test -test.run 3C > logs/out{}'
 
 # 合并所有输出文件
 cat logs/out* > logs/combined_output.log
