@@ -43,3 +43,40 @@ RequestVote和AppendEntries都是幂等的（即如果参数相同，则任意�
 
 3. 优化nextIndex的回退以通过TestFigure8Unreliable3C测试
 Leader第一次与Follower同步完成之后，就将剩余日志全部发送给Follower
+
+## Part 3D: log compaction
+1. 应用层调用Snapshot()函数，
+    在该函数中，raft持久化snapshot，裁剪自己的log
+2. leader与follower进行日志同步时，如果要发送的log entry在snapshot中，要调用InstallSnapshot PRC，将最新的snapshot同步给follower
+3. server重新启动时
+    * 恢复raft状态（currentTerm，voteFor，log）和snapshotde的lastIncludedIndex/Term
+    * 将snapshot发送给应用层
+    * 裁剪log（如果log包含snapshot中的日志条目）
+
+引入snapshot后其他需要改变的地方：
+1. RequestVote函数
+    进行update-to-date检查（checkUpToDate函数）时需要获取最后一个日志条目的真实index和term
+2. AppendEntreis函数
+* 判断prevLogIndex和prevLogTerm是否一致
+* 若一致，更新日志
+* 若不一致，找到冲突的term的第一个index
+3. Start函数返回值需要修改
+3. submit函数中修改获取log时的index
+4. ticker函数中
+* 发出RequestVote请求时，要获取自己最后一个日志条目的真实index和term
+* updateCommitIndex函数中获取最后一个条目的index
+* sendAppendEntries函数中，如果nextIndex在snapshot中，发起InstallSnapshot RPC
+* handleAppendEntriesReply函数中
+
+
+### 问题记录
+1. updateLog函数要返回日志更新后最后一个匹配的条目的index
+更新follower的commitIndex时需要注意
+2. submit中加锁，之后可能调用Snapshot再次加锁，造成死锁，-race检测不出来，snapshot函数中不加锁，在submit函数中最后提交一个无效命令确保前面的命令都被应用了
+3. 执行InstallSnapshot函数时需要确保状态机中没有待应用的日志条目
+    如果有，则可能在应用这些日志条目时该服务器自身会产生新的snapshot，导致之前的判断错误，造成snapshot回退，状态机状态丢失的情况
+4. 引入snapshot之后，调用persister.Save两个参数都不能为空，否则会丢失持久化的数据
+5. state machine 调用Snapshot函数时传递的数据包含lastIncludedIndex和键值对，raft传递回去时一致
+6. config.go中start1函数启动raft，会自动将snapshot同步给state machine，所以raft的readSnapshot函数中不需要再将snapshot发送给应用层
+7. raft持久化的snapshot与state machine传递的一致，lastIncludedTerm作为raft status持久化
+8. 需要确保将snapshot发送给state machine之后，下一条命令的index为lastIncludedIndex+1
