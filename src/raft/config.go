@@ -195,7 +195,7 @@ func (cfg *config) ingestSnap(i int, snapshot []byte, index int) string {
 	var xlog []interface{}
 	if d.Decode(&lastIncludedIndex) != nil ||
 		d.Decode(&xlog) != nil {
-		log.Fatalf("snapshot decode error")
+		log.Fatalf("S%d snapshot decode error", i)
 		return "snapshot Decode() error"
 	}
 	if index != -1 && index != lastIncludedIndex {
@@ -228,6 +228,7 @@ func (cfg *config) applierSnap(i int, applyCh chan ApplyMsg) {
 			err_msg = cfg.ingestSnap(i, m.Snapshot, m.SnapshotIndex)
 			cfg.mu.Unlock()
 		} else if m.CommandValid {
+			DPrintf("state machine receive a command with index %d from server S%d\n", m.CommandIndex, i)
 			if m.CommandIndex != cfg.lastApplied[i]+1 {
 				err_msg = fmt.Sprintf("server %v apply out of order, expected index %v, got %v", i, cfg.lastApplied[i]+1, m.CommandIndex)
 			}
@@ -247,6 +248,7 @@ func (cfg *config) applierSnap(i int, applyCh chan ApplyMsg) {
 			cfg.mu.Unlock()
 
 			if (m.CommandIndex+1)%SnapShotInterval == 0 {
+				DPrintf("state machine start create a snapshot for S%d\n", i)
 				w := new(bytes.Buffer)
 				e := labgob.NewEncoder(w)
 				e.Encode(m.CommandIndex)
@@ -255,6 +257,7 @@ func (cfg *config) applierSnap(i int, applyCh chan ApplyMsg) {
 					xlog = append(xlog, cfg.logs[i][j])
 				}
 				e.Encode(xlog)
+				DPrintf("state machine create a snapshot for S%d sucessfully!!! invoke Snapshot\n", i)
 				rf.Snapshot(m.CommandIndex, w.Bytes())
 			}
 		} else {
