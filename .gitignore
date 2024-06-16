@@ -5,3 +5,6 @@ api.key
 src/raft/out
 src/raft/logs
 src/raft/test
+src/kvraft/logs
+src/kvraft/out
+src/kvraft/test

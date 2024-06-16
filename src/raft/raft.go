@@ -82,10 +82,10 @@ const RequestVoteTimeout = 30 * time.Millisecond
 const AppendEntriesTimeout = 30 * time.Millisecond
 
 // 向状态机发送已提交日志的周期
-const SubmitTimeout = 20 * time.Millisecond
+const SubmitTimeout = 10 * time.Millisecond
 
 // Leader更新commitIndex的周期
-const UpdateCommittedTimeout = 20 * time.Millisecond
+const UpdateCommittedTimeout = 10 * time.Millisecond
 
 // InstallSnapshot发送周期
 const InstallSnapshotTimeout = 30 * time.Millisecond

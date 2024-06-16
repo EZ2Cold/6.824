@@ -1,14 +1,22 @@
 package kvraft
 
 import (
-	"6.5840/labgob"
-	"6.5840/labrpc"
-	"6.5840/raft"
 	"log"
 	"sync"
 	"sync/atomic"
+
+	"6.5840/labgob"
+	"6.5840/labrpc"
+	"6.5840/raft"
 )
 
+type CmdType int
+
+const (
+	GetCmd CmdType = iota
+	PutCmd
+	AppendCmd
+)
 const Debug = false
 
 func DPrintf(format string, a ...interface{}) (n int, err error) {
@@ -18,11 +26,16 @@ func DPrintf(format string, a ...interface{}) (n int, err error) {
 	return
 }
 
-
 type Op struct {
 	// Your definitions here.
 	// Field names must start with capital letters,
 	// otherwise RPC will break.
+	// 命令的类型：Get/Put/Append
+	Type     CmdType
+	Key      string
+	Value    string
+	ClientId int64
+	OpId     int64
 }
 
 type KVServer struct {
@@ -35,19 +48,154 @@ type KVServer struct {
 	maxraftstate int // snapshot if log grows this big
 
 	// Your definitions here.
+	// 保存所有键值对
+	kva map[string]string
+	// 上一条被应用的命令在raft log中的index
+	lastApplied int
+	// 条件变量，用于通知RPC请求响应client
+	cond_mu *sync.Mutex
+	cond    *sync.Cond
+	// 保存每个用户上一个被执行的操作的Id
+	lastOpIds map[int64]int64
 }
-
 
 func (kv *KVServer) Get(args *GetArgs, reply *GetReply) {
 	// Your code here.
+	DPrintf("S%d receive Get(%v)\n", kv.me, args.Key)
+	kv.mu.Lock()
+	lastOpId, exist := kv.lastOpIds[args.ClientId]
+	if exist && args.OpId <= lastOpId {
+		// 该命令已经执行过了，直接返回
+		reply.Err = OK
+		reply.Value = kv.kva[args.Key]
+		kv.mu.Unlock()
+		return
+	}
+	kv.mu.Unlock()
+
+	op := Op{
+		Type:     GetCmd,
+		Key:      args.Key,
+		ClientId: args.ClientId,
+		OpId:     args.OpId,
+	}
+	idx, term, isLeader := kv.rf.Start(op)
+	if !isLeader {
+		DPrintf("S%d is not leader, immediately return\n", kv.me)
+		// 当前服务器不是Leader，直接返回
+		reply.Err = ErrWrongLeader
+		return
+	}
+	DPrintf("S%d append a log entry at index %d\n", kv.me, idx)
+	// 等待大多数服务器对该命令达成共识，且当前服务器将命令应用于状态机之后，响应client
+	kv.cond_mu.Lock()
+	for kv.lastApplied < idx {
+		kv.cond.Wait()
+	}
+	kv.cond_mu.Unlock()
+	currentTerm, _ := kv.rf.GetState()
+	if term != currentTerm {
+		// 如果Leader的term发生了改变，则返回错误
+		// 用来解决该日志条目没有达成大多数共识的情况，要求client重试
+		// 可能存在false positive的情况，导致响应给client的时间变长
+		reply.Err = ErrWrongLeader
+	} else {
+		DPrintf("command %d has been committed, reply to client\n", idx)
+		reply.Err = OK
+		kv.mu.Lock()
+		reply.Value = kv.kva[args.Key]
+		kv.mu.Unlock()
+	}
 }
 
 func (kv *KVServer) Put(args *PutAppendArgs, reply *PutAppendReply) {
 	// Your code here.
+	DPrintf("S%d receive Put(%v, %v)\n", kv.me, args.Key, args.Value)
+
+	kv.mu.Lock()
+	lastOpId, exist := kv.lastOpIds[args.ClientId]
+	if exist && args.OpId <= lastOpId {
+		// 该命令已经执行过了，直接返回
+		reply.Err = OK
+		kv.mu.Unlock()
+		return
+	}
+	kv.mu.Unlock()
+
+	op := Op{
+		Type:     PutCmd,
+		Key:      args.Key,
+		Value:    args.Value,
+		ClientId: args.ClientId,
+		OpId:     args.OpId,
+	}
+	idx, term, isLeader := kv.rf.Start(op)
+	if !isLeader {
+		DPrintf("S%d is not leader, immediately return\n", kv.me)
+		reply.Err = ErrWrongLeader
+		return
+	}
+	DPrintf("S%d append a log entry at index %d\n", kv.me, idx)
+	kv.cond_mu.Lock()
+	for kv.lastApplied < idx {
+		kv.cond.Wait()
+	}
+	kv.cond_mu.Unlock()
+	currentTerm, _ := kv.rf.GetState()
+	if term != currentTerm {
+		// 如果Leader的term发生了改变，则返回错误
+		// 用来解决该日志条目没有达成大多数共识的情况，要求client重试
+		// 可能存在false positive的情况，导致响应给client的时间变长
+		reply.Err = ErrWrongLeader
+	} else {
+		DPrintf("command %d has been committed, reply to client\n", idx)
+		reply.Err = OK
+	}
 }
 
 func (kv *KVServer) Append(args *PutAppendArgs, reply *PutAppendReply) {
 	// Your code here.
+	DPrintf("S%d receive Append(%v, %v)\n", kv.me, args.Key, args.Value)
+
+	kv.mu.Lock()
+	lastOpId, exist := kv.lastOpIds[args.ClientId]
+	if exist && args.OpId <= lastOpId {
+		// 该命令已经执行过了，直接返回
+		reply.Err = OK
+		kv.mu.Unlock()
+		return
+	}
+	kv.mu.Unlock()
+
+	op := Op{
+		Type:     AppendCmd,
+		Key:      args.Key,
+		Value:    args.Value,
+		ClientId: args.ClientId,
+		OpId:     args.OpId,
+	}
+	idx, term, isLeader := kv.rf.Start(op)
+	if !isLeader {
+		DPrintf("S%d is not leader, immediately return\n", kv.me)
+		reply.Err = ErrWrongLeader
+		return
+	}
+	DPrintf("S%d append a log entry at index %d\n", kv.me, idx)
+	kv.cond_mu.Lock()
+	for kv.lastApplied < idx {
+		kv.cond.Wait()
+	}
+	kv.cond_mu.Unlock()
+	currentTerm, _ := kv.rf.GetState()
+	if term != currentTerm {
+		// 如果Leader的term发生了改变，则返回错误
+		// 用来解决该日志条目没有达成大多数共识的情况，要求client重试
+		// 可能存在false positive的情况，导致响应给client的时间变长
+		reply.Err = ErrWrongLeader
+	} else {
+		DPrintf("command %d has been committed, reply to client\n", idx)
+		reply.Err = OK
+	}
 }
 
 // the tester calls Kill() when a KVServer instance won't
@@ -96,6 +244,61 @@ func StartKVServer(servers []*labrpc.ClientEnd, me int, persister *raft.Persiste
 	kv.rf = raft.Make(servers, me, persister, kv.applyCh)
 
 	// You may need initialization code here.
+	kv.kva = map[string]string{}
+	kv.lastApplied = 0
 
+	kv.cond_mu = &sync.Mutex{}
+	kv.cond = sync.NewCond(kv.cond_mu)
+
+	kv.lastOpIds = map[int64]int64{}
+
+	go kv.applier()
 	return kv
+}
+
+// 该函数不断地从applyCh中读取命令并应用于状态机
+func (kv *KVServer) applier() {
+	for msg := range kv.applyCh {
+		if msg.CommandValid {
+			cmd := msg.Command.(Op)
+			kv.mu.Lock()
+			lastOpId, exist := kv.lastOpIds[cmd.ClientId]
+			if exist && cmd.OpId <= lastOpId {
+				// 该命令已经执行过了
+				kv.mu.Unlock()
+				continue
+			}
+
+			switch cmd.Type {
+			case GetCmd:
+			case PutCmd:
+				kv.processPut(&cmd)
+			case AppendCmd:
+				kv.processAppend(&cmd)
+			}
+			// 更新最后执行的操作的Id
+			kv.lastOpIds[cmd.ClientId] = cmd.OpId
+			kv.mu.Unlock()
+
+		} else if msg.SnapshotValid {
+
+		} else {
+			// 忽略其他命令
+		}
+		if msg.CommandValid || msg.SnapshotValid {
+			kv.cond_mu.Lock()
+			kv.lastApplied = msg.CommandIndex
+			kv.cond.Broadcast()
+			kv.cond_mu.Unlock()
+			DPrintf("S%d finish applying cmd{%v} with index %d, invoke signal\n", kv.me, msg.Command, msg.CommandIndex)
+		}
+	}
+}
+
+func (kv *KVServer) processPut(op *Op) {
+	kv.kva[op.Key] = op.Value
+}
+
+func (kv *KVServer) processAppend(op *Op) {
+	kv.kva[op.Key] = kv.kva[op.Key] + op.Value
 }
