@@ -22,3 +22,15 @@ client可以进行如下操作：
 
 对于一个Get/Put/Append操作，client可能会同时向一个或多个服务器发出多次重复请求（由于请求长时间未响应/请求失败等原因），直到操作成功为止。因此，raft的日志中可能存在关于一个操作的多个日志条目，需要进行duplicate detection，保证每个操作只执行一次。
 
+## Part B: Key/value service with snapshots
+### snapshot要包含哪些东西
+* lastIncludedIndex和状态机状态（与lab3兼容）
+* 每个用户上一个执行的操作编号，确保安装了snapshot之后还可以进行去重检测
+
+### 何时进行snapshot
+每次执行一个command之后判断raft state size 是否大于maxraftstate，若是，则调用Snapshot函数。
+
+key/value服务器启动时，若有snapshot，则通过其恢复状态机状态。
+
+SnapshotValid为true的命令没有CommandIndex，该条命令不存在于raft的log中。
+

@@ -1,6 +1,7 @@
 package kvraft
 
 import (
+	"bytes"
 	"log"
 	"sync"
 	"sync/atomic"
@@ -17,7 +18,7 @@ const (
 	PutCmd
 	AppendCmd
 )
-const Debug = false
+const Debug = true
 
 func DPrintf(format string, a ...interface{}) (n int, err error) {
 	if Debug {
@@ -48,13 +49,13 @@ type KVServer struct {
 	maxraftstate int // snapshot if log grows this big
 
 	// Your definitions here.
+	persister *raft.Persister
 	// 保存所有键值对
 	kva map[string]string
 	// 上一条被应用的命令在raft log中的index
 	lastApplied int
 	// 条件变量，用于通知RPC请求响应client
-	cond_mu *sync.Mutex
-	cond    *sync.Cond
+	cond *sync.Cond
 	// 保存每个用户上一个被执行的操作的Id
 	lastOpIds map[int64]int64
 }
@@ -88,11 +89,11 @@ func (kv *KVServer) Get(args *GetArgs, reply *GetReply) {
 	}
 	DPrintf("S%d append a log entry at index %d\n", kv.me, idx)
 	// 等待大多数服务器对该命令达成共识，且当前服务器将命令应用于状态机之后，响应client
-	kv.cond_mu.Lock()
+	kv.mu.Lock()
 	for kv.lastApplied < idx {
 		kv.cond.Wait()
 	}
-	kv.cond_mu.Unlock()
+	kv.mu.Unlock()
 	currentTerm, _ := kv.rf.GetState()
 	if term != currentTerm {
 		// 如果Leader的term发生了改变，则返回错误
@@ -136,11 +137,11 @@ func (kv *KVServer) Put(args *PutAppendArgs, reply *PutAppendReply) {
 		return
 	}
 	DPrintf("S%d append a log entry at index %d\n", kv.me, idx)
-	kv.cond_mu.Lock()
+	kv.mu.Lock()
 	for kv.lastApplied < idx {
 		kv.cond.Wait()
 	}
-	kv.cond_mu.Unlock()
+	kv.mu.Unlock()
 	currentTerm, _ := kv.rf.GetState()
 	if term != currentTerm {
 		// 如果Leader的term发生了改变，则返回错误
@@ -181,11 +182,11 @@ func (kv *KVServer) Append(args *PutAppendArgs, reply *PutAppendReply) {
 		return
 	}
 	DPrintf("S%d append a log entry at index %d\n", kv.me, idx)
-	kv.cond_mu.Lock()
+	kv.mu.Lock()
 	for kv.lastApplied < idx {
 		kv.cond.Wait()
 	}
-	kv.cond_mu.Unlock()
+	kv.mu.Unlock()
 	currentTerm, _ := kv.rf.GetState()
 	if term != currentTerm {
 		// 如果Leader的term发生了改变，则返回错误
@@ -239,21 +240,40 @@ func StartKVServer(servers []*labrpc.ClientEnd, me int, persister *raft.Persiste
 	kv.maxraftstate = maxraftstate
 
 	// You may need initialization code here.
-
+	kv.persister = persister
 	kv.applyCh = make(chan raft.ApplyMsg)
 	kv.rf = raft.Make(servers, me, persister, kv.applyCh)
 
 	// You may need initialization code here.
 	kv.kva = map[string]string{}
 	kv.lastApplied = 0
-
-	kv.cond_mu = &sync.Mutex{}
-	kv.cond = sync.NewCond(kv.cond_mu)
-
 	kv.lastOpIds = map[int64]int64{}
+	kv.recoverFromSnapshot()
+
+	kv.cond = sync.NewCond(&kv.mu)
 
 	go kv.applier()
 	return kv
+}
+
+func (kv *KVServer) recoverFromSnapshot() {
+	snapshot := kv.persister.ReadSnapshot()
+	if snapshot == nil || len(snapshot) < 1 {
+		// 没有snapshot
+		DPrintf("no snapshot\n")
+		return
+	}
+	var lastApplied int
+	var kva map[string]string
+	var lastOpIds map[int64]int64
+	r := bytes.NewBuffer(snapshot)
+	d := labgob.NewDecoder(r)
+	if d.Decode(&lastApplied) != nil || d.Decode(&kva) != nil || d.Decode(&lastOpIds) != nil {
+		log.Fatalf("recoverFromSnapshot: snapshot decode error")
+	}
+	kv.lastApplied = lastApplied
+	kv.kva = kva
+	kv.lastOpIds = lastOpIds
 }
 
 // 该函数不断地从applyCh中读取命令并应用于状态机
@@ -265,6 +285,9 @@ func (kv *KVServer) applier() {
 			lastOpId, exist := kv.lastOpIds[cmd.ClientId]
 			if exist && cmd.OpId <= lastOpId {
 				// 该命令已经执行过了
+				kv.lastApplied = msg.CommandIndex
+				kv.cond.Broadcast()
+				DPrintf("S%d finish applying cmds until index %d, invoke signal\n", kv.me, kv.lastApplied)
 				kv.mu.Unlock()
 				continue
 			}
@@ -278,19 +301,42 @@ func (kv *KVServer) applier() {
 			}
 			// 更新最后执行的操作的Id
 			kv.lastOpIds[cmd.ClientId] = cmd.OpId
+			// 更新应用于状态机的最后一条命令的在raft log中的index
+			kv.lastApplied = msg.CommandIndex
+
+			// 判断是否需要调用Snapshot函数
+			if kv.maxraftstate != -1 && kv.persister.RaftStateSize() > kv.maxraftstate {
+				w := new(bytes.Buffer)
+				e := labgob.NewEncoder(w)
+				e.Encode(kv.lastApplied)
+				e.Encode(kv.kva)
+				e.Encode(kv.lastOpIds)
+				DPrintf("S%d invoke Snapshot(%d, x)\n", kv.me, kv.lastApplied)
+				kv.rf.Snapshot(kv.lastApplied, w.Bytes())
+			}
 			kv.mu.Unlock()
 
 		} else if msg.SnapshotValid {
-
+			DPrintf("S%d install a snapshot\n", kv.me)
+			kv.mu.Lock()
+			var lastApplied int
+			var kva map[string]string
+			var lastOpIds map[int64]int64
+			r := bytes.NewBuffer(msg.Snapshot)
+			d := labgob.NewDecoder(r)
+			if d.Decode(&lastApplied) != nil || d.Decode(&kva) != nil || d.Decode(&lastOpIds) != nil {
+				log.Fatalf("applier: snapshot decode error")
+			}
+			kv.lastApplied = lastApplied
+			kv.kva = kva
+			kv.lastOpIds = lastOpIds
+			kv.mu.Unlock()
 		} else {
 			// 忽略其他命令
 		}
 		if msg.CommandValid || msg.SnapshotValid {
-			kv.cond_mu.Lock()
-			kv.lastApplied = msg.CommandIndex
 			kv.cond.Broadcast()
-			kv.cond_mu.Unlock()
-			DPrintf("S%d finish applying cmd{%v} with index %d, invoke signal\n", kv.me, msg.Command, msg.CommandIndex)
+			DPrintf("S%d finish applying cmds until index %d, invoke signal\n", kv.me, kv.lastApplied)
 		}
 	}
 }

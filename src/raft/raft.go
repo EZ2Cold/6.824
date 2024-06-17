@@ -1012,6 +1012,7 @@ type InstallSnapshotReply struct {
 }
 
 func (rf *Raft) InstallSnapshot(args *InstallSnapshotArgs, reply *InstallSnapshotReply) {
+	DPrintf("S%d receive InstallSnapshot: {lastIncludedIndex=%d, lastIncludedTerm=%d, len(snapshot)=%d}\n", rf.me, args.LastIncludedIndex, args.LastIncludedTerm, len(args.Data))
 	rf.mu.Lock()
 	defer rf.mu.Unlock()
 	if args.Term < rf.currentTerm {
@@ -1025,7 +1026,6 @@ func (rf *Raft) InstallSnapshot(args *InstallSnapshotArgs, reply *InstallSnapsho
 		// 要安装的snapshot是已有snapshot的prefix
 		return
 	}
-	DPrintf("S%d receive InstallSnapshot: {lastIncludedIndex=%d, lastIncludedTerm=%d, len(snapshot)=%d}\n", rf.me, args.LastIncludedIndex, args.LastIncludedTerm, len(args.Data))
 	// 更新snapshot
 	rf.snapshot = clone(args.Data)
 	if args.LastIncludedIndex+1 >= rf.getLogLen() || rf.log[args.LastIncludedIndex-rf.logStartIndex].Term != args.LastIncludedTerm {

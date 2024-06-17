@@ -62,7 +62,7 @@ func (ck *Clerk) Get(key string) string {
 	for {
 		go func(i int) {
 			reply := GetReply{}
-			DPrintf("Client %d send Get(%v) to Server(handler num %d)\n", ck.clientId, key, ck.leaderId)
+			DPrintf("Client %d send Get(%v) to Server(handler num %d)\n", ck.clientId, key, i)
 			ok := ck.servers[i].Call("KVServer.Get", &args, &reply)
 			if ok && reply.Err == OK {
 				mu.Lock()
@@ -70,7 +70,7 @@ func (ck *Clerk) Get(key string) string {
 					finish = true
 					res = reply.Value
 					ck.opId++
-					DPrintf("Client %d sucessfully receive Get(%v) reply from Server(handler num %d)\n", ck.clientId, key, ck.leaderId)
+					DPrintf("Client %d sucessfully receive Get(%v) reply from Server(handler num %d)\n", ck.clientId, key, i)
 					done <- true
 				}
 				mu.Unlock()
@@ -119,14 +119,14 @@ func (ck *Clerk) PutAppend(key string, value string, op string) {
 	for {
 		go func(i int) {
 			reply := PutAppendReply{}
-			DPrintf("Client %d send %v(%v, %v) to Server(handler num %d)\n", ck.clientId, op, key, value, ck.leaderId)
-			ok := ck.servers[ck.leaderId].Call("KVServer."+op, &args, &reply)
+			DPrintf("Client %d send %v(%v, %v) to Server(handler num %d)\n", ck.clientId, op, key, value, i)
+			ok := ck.servers[i].Call("KVServer."+op, &args, &reply)
 			if ok && reply.Err == OK {
 				mu.Lock()
 				if !finish {
 					finish = true
 					ck.opId++
-					DPrintf("Client %d sucessfully receive %v(%v, %v) reply from Server(handler num %d)\n", ck.clientId, op, key, value, ck.leaderId)
+					DPrintf("Client %d sucessfully receive %v(%v, %v) reply from Server(handler num %d)\n", ck.clientId, op, key, value, i)
 					done <- true
 				}
 				mu.Unlock()
