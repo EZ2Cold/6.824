@@ -80,3 +80,6 @@ Leader第一次与Follower同步完成之后，就将剩余日志全部发送给
 6. config.go中start1函数启动raft，会自动将snapshot同步给state machine，所以raft的readSnapshot函数中不需要再将snapshot发送给应用层
 7. raft持久化的snapshot与state machine传递的一致，lastIncludedTerm作为raft status持久化
 8. 需要确保将snapshot发送给state machine之后，下一条命令的index为lastIncludedIndex+1
+9. 执行InstallSnapshot函数时（测试TestSnapshotRPC4B时发现的）
+    并不是给一个服务器发送InstallSnapshot之前必然会有AppendEntries RPC，考虑一个失联的服务器的nextIndex可能小于logStartIndex，在失联期间Leader调用了Snapshot，则nextIndex可能会大于logStartIndex，则之后如果服务器恢复，会直接发送InstallSnapshot。
+    因此，执行InstallSnapshot函数时当前服务器可能为Leader或者Candidate，如果RPC中的term较大，则需要进行状态转换。

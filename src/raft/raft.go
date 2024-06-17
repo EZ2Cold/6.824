@@ -1019,7 +1019,13 @@ func (rf *Raft) InstallSnapshot(args *InstallSnapshotArgs, reply *InstallSnapsho
 		reply.Term = rf.currentTerm
 		return
 	}
-	// 重置选举计时器
+	if args.Term > rf.currentTerm {
+		rf.currentTerm = args.Term
+		rf.votedFor = -1
+		rf.persist()
+		DPrintf("InstallSnapshot:S%d turn to a follower of leader S%d\n", rf.me, args.LeaderId)
+	}
+	rf.status = Follower
 	rf.electionStartTime = time.Now()
 
 	if args.LastIncludedIndex <= rf.lastIncludedIndex {

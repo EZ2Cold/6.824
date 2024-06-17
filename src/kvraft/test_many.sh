@@ -15,7 +15,7 @@ start_time=$(date)
 echo "测试开始时间: $start_time" > logs/time
 
 # 生成任务列表并并行执行测试
-seq 1 $num_tests | parallel -j 10 'rm -f logs/out{} && ./test > logs/out{}'
+seq 1 $num_tests | parallel -j 10 'rm -f logs/out{} && ./test> logs/out{}'
 
 # 合并所有输出文件
 cat logs/out* > logs/combined_output.log
